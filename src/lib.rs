@@ -372,6 +372,11 @@ impl<H, F> DstArray<H, F> {
             )
         }
     }
+
+    pub fn swap(&mut self, arr: &mut DstArray<H, F>) {
+        std::mem::swap(&mut self.ptr, &mut arr.ptr);
+        std::mem::swap(&mut self.len, &mut arr.len);
+    }
 }
 
 impl<H, F> Drop for DstArray<H, F> {
@@ -611,5 +616,36 @@ mod tests {
         let mut dst_arr = MaybeUninitDstArray::<u32, u8>::new(2, 2);
 
         dst_arr.write_header(2, 1);
+    }
+
+    #[test]
+    fn swap() {
+        let mut dst_arr1 = MaybeUninitDstArray::<u32, u8>::new(1, 1);
+
+        dst_arr1.write_header(0, 0);
+        dst_arr1.write_footer_element(0, 0, 0);
+
+        let mut dst_arr1 = unsafe { dst_arr1.assume_init() };
+
+        let mut dst_arr2 = MaybeUninitDstArray::<u32, u8>::new(1, 1);
+
+        dst_arr2.write_header(0, 1);
+        dst_arr2.write_footer_element(0, 0, 1);
+
+        let mut dst_arr2 = unsafe { dst_arr2.assume_init() };
+
+        let ptr1 = dst_arr1.ptr;
+        let ptr2 = dst_arr2.ptr;
+
+        assert!(*dst_arr1.get_header_ref(0) == 0);
+        assert!(*dst_arr2.get_header_ref(0) == 1);
+
+        dst_arr1.swap(&mut dst_arr2);
+
+        assert!(ptr1 == dst_arr2.ptr);
+        assert!(ptr2 == dst_arr1.ptr);
+
+        assert!(*dst_arr1.get_header_ref(0) == 1);
+        assert!(*dst_arr2.get_header_ref(0) == 0);
     }
 }
