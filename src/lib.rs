@@ -10,6 +10,7 @@
 use std::{
     alloc::{alloc, dealloc, handle_alloc_error, Layout, LayoutError},
     marker::PhantomData,
+    mem::transmute,
     ops::{Index, IndexMut},
     ptr::{self, addr_of_mut, drop_in_place, from_raw_parts_mut},
 };
@@ -357,6 +358,18 @@ impl<H, F> DstArray<H, F> {
             start: unsafe { self.ptr.byte_add(stride * start) },
             len: end - start,
             phantom: PhantomData,
+        }
+    }
+
+    pub fn get_mut_arr_element<'a>(&'a mut self, index: usize) -> &'a mut DstData<H, F> {
+        assert!(index < self.len);
+
+        let stride = self.get_stride();
+
+        unsafe {
+            transmute::<*mut DstData<H, F>, &'a mut DstData<H, F>>(
+                self.ptr.byte_add(stride * index),
+            )
         }
     }
 }
