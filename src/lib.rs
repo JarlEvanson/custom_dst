@@ -9,6 +9,7 @@
 
 use std::{
     alloc::{alloc, dealloc, handle_alloc_error, Layout, LayoutError},
+    cmp,
     marker::PhantomData,
     mem::transmute,
     ops::{Index, IndexMut},
@@ -55,9 +56,7 @@ impl<H, F> DstData<H, F> {
             handle_alloc_error(layout);
         } else {
             //Needed to make the pointer a fat pointer
-            let ptr = from_raw_parts_mut::<DstData<H, F>>(ptr as *mut (), count);
-
-            ptr
+            from_raw_parts_mut::<DstData<H, F>>(ptr as *mut (), count)
         }
     }
 
@@ -70,9 +69,7 @@ impl<H, F> DstData<H, F> {
 
         let ptr = alloc(layout);
 
-        let ptr = ptr::slice_from_raw_parts(ptr, count) as *mut DstData<H, F>;
-
-        ptr
+        ptr::slice_from_raw_parts(ptr, count) as *mut DstData<H, F>
     }
 
     unsafe fn get_footer_slice(ptr: *mut Self) -> *mut [F] {
@@ -135,6 +132,9 @@ impl<H, F> MaybeUninitDst<H, F> {
         }
     }
 
+    ///# Safety
+    ///
+    /// Implies that all parts of the Dst have been initialized
     pub unsafe fn assume_init(self) -> Dst<H, F> {
         Dst { ptr: self.ptr }
     }
@@ -193,19 +193,19 @@ pub struct Dst<H: Sized, F: Sized> {
 }
 
 impl<H, F> Dst<H, F> {
-    pub fn get_header_ref<'a>(&'a self) -> &'a H {
+    pub fn get_header_ref(&self) -> &H {
         unsafe { &(*self.ptr).header }
     }
 
-    pub fn get_header_ref_mut<'a>(&'a mut self) -> &'a mut H {
+    pub fn get_header_ref_mut(&mut self) -> &mut H {
         unsafe { &mut (*self.ptr).header }
     }
 
-    pub fn get_footer_ref<'a>(&'a self) -> &'a [F] {
+    pub fn get_footer_ref(&self) -> &[F] {
         unsafe { &(*self.ptr).footer }
     }
 
-    pub fn get_footer_ref_mut<'a>(&'a mut self) -> &'a mut [F] {
+    pub fn get_footer_ref_mut(&mut self) -> &mut [F] {
         unsafe { &mut (*self.ptr).footer }
     }
 
@@ -254,7 +254,9 @@ impl<H, F> MaybeUninitDstArray<H, F> {
 
         MaybeUninitDst { ptr }
     }
-
+    ///# Safety
+    ///
+    /// Declares that the Dst array is fully initialized, and is unsafe it has not been
     pub unsafe fn assume_init(self) -> DstArray<H, F> {
         DstArray {
             len: self.len,
@@ -328,19 +330,19 @@ impl<H, F> DstArray<H, F> {
         unsafe { DstData::<H, F>::layout_of(DstData::get_len(self.ptr)).unwrap() }.size()
     }
 
-    pub fn get_header_ref<'a>(&'a self, arr_index: usize) -> &'a H {
+    pub fn get_header_ref(&self, arr_index: usize) -> &H {
         &self[arr_index].header
     }
 
-    pub fn get_header_ref_mut<'a>(&'a mut self, arr_index: usize) -> &'a mut H {
+    pub fn get_header_ref_mut(&mut self, arr_index: usize) -> &mut H {
         &mut self[arr_index].header
     }
 
-    pub fn get_footer_ref<'a>(&'a self, arr_index: usize) -> &'a [F] {
+    pub fn get_footer_ref(&self, arr_index: usize) -> &[F] {
         &self[arr_index].footer
     }
 
-    pub fn get_footer_ref_mut<'a>(&'a mut self, arr_index: usize) -> &'a mut [F] {
+    pub fn get_footer_ref_mut(&mut self, arr_index: usize) -> &mut [F] {
         &mut self[arr_index].footer
     }
 
@@ -348,7 +350,7 @@ impl<H, F> DstArray<H, F> {
         self.get_footer_ref(0).len()
     }
 
-    pub fn get_mut_slice<'a>(&'a mut self, start: usize, end: usize) -> DstSliceMut<'a, H, F> {
+    pub fn get_mut_slice(&mut self, start: usize, end: usize) -> DstSliceMut<H, F> {
         assert!(start < end);
         assert!(end <= self.len);
 
@@ -361,16 +363,12 @@ impl<H, F> DstArray<H, F> {
         }
     }
 
-    pub fn get_mut_arr_element<'a>(&'a mut self, index: usize) -> &'a mut DstData<H, F> {
+    pub fn get_mut_arr_element(&mut self, index: usize) -> &mut DstData<H, F> {
         assert!(index < self.len);
 
         let stride = self.get_stride();
 
-        unsafe {
-            transmute::<*mut DstData<H, F>, &'a mut DstData<H, F>>(
-                self.ptr.byte_add(stride * index),
-            )
-        }
+        unsafe { &mut *self.ptr.byte_add(stride * index) }
     }
 
     pub fn swap(&mut self, arr: &mut DstArray<H, F>) {
@@ -378,13 +376,15 @@ impl<H, F> DstArray<H, F> {
         std::mem::swap(&mut self.len, &mut arr.len);
     }
 
-    pub fn get_arr_element<'a>(&'a self, index: usize) -> &'a DstData<H, F> {
+    pub fn get_arr_element(&self, index: usize) -> &DstData<H, F> {
         assert!(index < self.len);
 
         let stride = self.get_stride();
 
         unsafe {
-            transmute::<*mut DstData<H, F>, &'a DstData<H, F>>(self.ptr.byte_add(stride * index))
+            &*transmute::<*mut DstData<H, F>, *const DstData<H, F>>(
+                self.ptr.byte_add(stride * index),
+            )
         }
     }
 }
@@ -476,28 +476,94 @@ impl<'a, H, F> IndexMut<usize> for DstSliceMut<'a, H, F> {
     }
 }
 
-impl<'a, H, F> DstSliceMut<'a, H, F> {
-    pub fn split_at_mut(&self, mid: usize) -> (DstSliceMut<H, F>, DstSliceMut<H, F>) {
-        assert!(mid <= self.len);
+trait SplitSliceExt<'a, H, F> {
+    unsafe fn split_at_mut(
+        self,
+        len: usize,
+        mid: usize,
+    ) -> (DstSliceMut<'a, H, F>, DstSliceMut<'a, H, F>);
+    unsafe fn split_at_mut_unchecked(
+        self,
+        len: usize,
+        mid: usize,
+    ) -> (DstSliceMut<'a, H, F>, DstSliceMut<'a, H, F>);
+}
+
+impl<'a, H, F> SplitSliceExt<'a, H, F> for *mut DstSliceMut<'a, H, F> {
+    unsafe fn split_at_mut(
+        self,
+        len: usize,
+        mid: usize,
+    ) -> (DstSliceMut<'a, H, F>, DstSliceMut<'a, H, F>) {
+        assert!(mid <= len);
+
+        unsafe { Self::split_at_mut_unchecked(self, len, mid) }
+    }
+
+    unsafe fn split_at_mut_unchecked(
+        self,
+        len: usize,
+        mid: usize,
+    ) -> (DstSliceMut<'a, H, F>, DstSliceMut<'a, H, F>) {
         unsafe {
-            let stride = DstData::<H, F>::layout_of((*self.start).footer.len())
-                .unwrap()
-                .size();
-            let ptr = self.start.byte_add(mid * stride);
+            (
+                DstSliceMut {
+                    start: (*self).start,
+                    len: mid,
+                    phantom: PhantomData,
+                },
+                DstSliceMut {
+                    start: (*self).start.byte_add(
+                        DstData::<H, F>::layout_of((*(*self).start).get_footer().len())
+                            .unwrap()
+                            .size()
+                            * mid,
+                    ),
+                    len: len - mid,
+                    phantom: PhantomData,
+                },
+            )
+        }
+    }
+}
 
-            let first = DstSliceMut {
-                start: self.start,
-                len: mid,
-                phantom: PhantomData,
+impl<'a, H, F> DstSliceMut<'a, H, F> {
+    pub fn as_mut_ptr(&mut self) -> *mut DstData<H, F> {
+        self.start
+    }
+}
+
+pub struct DstChunksMut<'a, H: Sized, F: Sized> {
+    slice: DstSliceMut<'a, H, F>,
+    chunk_size: usize,
+}
+
+impl<'a, H, F> DstChunksMut<'a, H, F> {
+    pub fn new(slice: DstSliceMut<'a, H, F>, size: usize) -> Self {
+        Self {
+            slice,
+            chunk_size: size,
+        }
+    }
+}
+
+impl<'a, H, F> Iterator for DstChunksMut<'a, H, F> {
+    type Item = DstSliceMut<'a, H, F>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.slice.len == 0 {
+            None
+        } else {
+            let chunksz = cmp::min(self.slice.len, self.chunk_size);
+
+            let (fst, snd) = unsafe {
+                (&mut self.slice as *mut DstSliceMut<'a, H, F>)
+                    .split_at_mut(self.slice.len, chunksz)
             };
+            let x = Some(fst);
+            self.slice = snd;
 
-            let second = DstSliceMut {
-                start: ptr,
-                len: self.len - mid,
-                phantom: PhantomData,
-            };
-
-            (first, second)
+            x
         }
     }
 }
