@@ -3,21 +3,40 @@
     alloc_layout_extra,
     layout_for_ptr,
     slice_ptr_get,
-    pointer_byte_offsets
+    pointer_byte_offsets,
+    slice_index_methods
 )]
 
 use std::{
     alloc::{alloc, dealloc, handle_alloc_error, Layout, LayoutError},
+    marker::PhantomData,
+    ops::{Index, IndexMut},
     ptr::{self, addr_of_mut, drop_in_place, from_raw_parts_mut},
 };
 
 #[repr(C)]
-struct DstData<H: Sized, F: Sized> {
+pub struct DstData<H: Sized, F: Sized> {
     header: H,
     footer: [F],
 }
 
 impl<H, F> DstData<H, F> {
+    pub fn get_header(&self) -> &H {
+        &self.header
+    }
+
+    pub fn get_header_mut(&mut self) -> &mut H {
+        &mut self.header
+    }
+
+    pub fn get_footer(&self) -> &[F] {
+        &self.footer
+    }
+
+    pub fn get_mut_footer(&mut self) -> &mut [F] {
+        &mut self.footer
+    }
+
     fn layout_of(count: usize) -> Result<Layout, LayoutError> {
         let (mut layout, _) = Layout::new::<H>().extend(Layout::array::<F>(count)?)?;
         layout = layout.pad_to_align();
@@ -59,11 +78,11 @@ impl<H, F> DstData<H, F> {
         addr_of_mut!((*ptr).footer)
     }
 
-    unsafe fn get_header(ptr: *mut Self) -> *mut H {
+    unsafe fn get_header_ptr(ptr: *mut Self) -> *mut H {
         addr_of_mut!((*ptr).header)
     }
 
-    unsafe fn get_len(ptr: *mut Self) -> usize {
+    unsafe fn get_len(ptr: *const Self) -> usize {
         unsafe { (*ptr).footer.len() }
     }
 }
@@ -122,13 +141,13 @@ impl<H, F> MaybeUninitDst<H, F> {
     ///Reading from this pointer or turning it into a reference is undefined behavior
     ///unless the header has been initialized
     pub fn get_header_ptr(&self) -> *const H {
-        unsafe { DstData::get_header(self.ptr) as *const H }
+        unsafe { DstData::get_header_ptr(self.ptr) as *const H }
     }
 
     ///Reading from this pointer or turning it into a reference is undefined behavior
     ///unless the header has been initialized
     pub fn get_header_ptr_mut(&mut self) -> *mut H {
-        unsafe { DstData::get_header(self.ptr) }
+        unsafe { DstData::get_header_ptr(self.ptr) }
     }
 
     ///Reading from this pointer or turning it into a reference is undefined behavior
@@ -308,32 +327,37 @@ impl<H, F> DstArray<H, F> {
         unsafe { DstData::<H, F>::layout_of(DstData::get_len(self.ptr)).unwrap() }.size()
     }
 
-    fn get_element(&self, arr_index: usize) -> *mut DstData<H, F> {
-        assert!(arr_index < self.len);
-
-        let stride = self.get_stride();
-
-        unsafe { self.ptr.byte_add(stride * arr_index) }
-    }
-
     pub fn get_header_ref<'a>(&'a self, arr_index: usize) -> &'a H {
-        unsafe { &(*self.get_element(arr_index)).header }
+        &self[arr_index].header
     }
 
     pub fn get_header_ref_mut<'a>(&'a mut self, arr_index: usize) -> &'a mut H {
-        unsafe { &mut (*self.get_element(arr_index)).header }
+        &mut self[arr_index].header
     }
 
     pub fn get_footer_ref<'a>(&'a self, arr_index: usize) -> &'a [F] {
-        unsafe { &(*self.get_element(arr_index)).footer }
+        &self[arr_index].footer
     }
 
     pub fn get_footer_ref_mut<'a>(&'a mut self, arr_index: usize) -> &'a mut [F] {
-        unsafe { &mut (*self.get_element(arr_index)).footer }
+        &mut self[arr_index].footer
     }
 
     pub fn get_footer_len(&self) -> usize {
         self.get_footer_ref(0).len()
+    }
+
+    pub fn get_mut_slice<'a>(&'a mut self, start: usize, end: usize) -> DstSliceMut<'a, H, F> {
+        assert!(start < end);
+        assert!(end <= self.len);
+
+        let stride = self.get_stride();
+
+        DstSliceMut {
+            start: unsafe { self.ptr.byte_add(stride * start) },
+            len: end - start,
+            phantom: PhantomData,
+        }
     }
 }
 
@@ -354,6 +378,98 @@ impl<H, F> Drop for DstArray<H, F> {
 
         unsafe {
             dealloc(self.ptr as *mut u8, layout);
+        }
+    }
+}
+
+impl<H, F> Index<usize> for DstArray<H, F> {
+    type Output = DstData<H, F>;
+
+    fn index(&self, index: usize) -> &DstData<H, F> {
+        let stride = unsafe { DstData::<H, F>::layout_of((*self.ptr).footer.len()) }
+            .unwrap()
+            .size();
+
+        let ptr = unsafe { self.ptr.byte_add(stride * index) };
+
+        assert!(ptr <= unsafe { self.ptr.byte_add(stride * self.len) });
+
+        unsafe { &*ptr }
+    }
+}
+
+impl<H, F> IndexMut<usize> for DstArray<H, F> {
+    fn index_mut(&mut self, index: usize) -> &mut DstData<H, F> {
+        let stride = unsafe { DstData::<H, F>::layout_of((*self.ptr).footer.len()) }
+            .unwrap()
+            .size();
+
+        let ptr = unsafe { self.ptr.byte_add(stride * index) };
+
+        assert!(ptr <= unsafe { self.ptr.byte_add(stride * self.len) });
+
+        unsafe { &mut *ptr }
+    }
+}
+
+pub struct DstSliceMut<'a, H: Sized, F: Sized> {
+    start: *mut DstData<H, F>,
+    len: usize,
+    phantom: PhantomData<&'a mut DstData<H, F>>,
+}
+
+impl<'a, H, F> Index<usize> for DstSliceMut<'a, H, F> {
+    type Output = DstData<H, F>;
+
+    fn index(&self, index: usize) -> &DstData<H, F> {
+        assert!(index < self.len);
+
+        let stride = unsafe { DstData::<H, F>::layout_of((*self.start).footer.len()) }
+            .unwrap()
+            .size();
+
+        let ptr = unsafe { self.start.byte_add(stride * index) };
+
+        unsafe { &*ptr }
+    }
+}
+
+impl<'a, H, F> IndexMut<usize> for DstSliceMut<'a, H, F> {
+    fn index_mut(&mut self, index: usize) -> &mut DstData<H, F> {
+        assert!(index < self.len);
+
+        let stride = unsafe { DstData::<H, F>::layout_of((*self.start).footer.len()) }
+            .unwrap()
+            .size();
+
+        let ptr = unsafe { self.start.byte_add(stride * index) };
+
+        unsafe { &mut *ptr }
+    }
+}
+
+impl<'a, H, F> DstSliceMut<'a, H, F> {
+    pub fn split_at_mut(&self, mid: usize) -> (DstSliceMut<H, F>, DstSliceMut<H, F>) {
+        assert!(mid <= self.len);
+        unsafe {
+            let stride = DstData::<H, F>::layout_of((*self.start).footer.len())
+                .unwrap()
+                .size();
+            let ptr = self.start.byte_add(mid * stride);
+
+            let first = DstSliceMut {
+                start: self.start,
+                len: mid,
+                phantom: PhantomData,
+            };
+
+            let second = DstSliceMut {
+                start: ptr,
+                len: self.len - mid,
+                phantom: PhantomData,
+            };
+
+            (first, second)
         }
     }
 }
