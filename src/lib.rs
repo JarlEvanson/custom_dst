@@ -377,6 +377,16 @@ impl<H, F> DstArray<H, F> {
         std::mem::swap(&mut self.ptr, &mut arr.ptr);
         std::mem::swap(&mut self.len, &mut arr.len);
     }
+
+    pub fn get_arr_element<'a>(&'a self, index: usize) -> &'a DstData<H, F> {
+        assert!(index < self.len);
+
+        let stride = self.get_stride();
+
+        unsafe {
+            transmute::<*mut DstData<H, F>, &'a DstData<H, F>>(self.ptr.byte_add(stride * index))
+        }
+    }
 }
 
 impl<H, F> Drop for DstArray<H, F> {
