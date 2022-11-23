@@ -39,6 +39,10 @@ impl<H, F> DstData<H, F> {
         &mut self.footer
     }
 
+    pub fn get_parts_mut(&mut self) -> (&mut H, &mut [F]) {
+        (&mut self.header, &mut self.footer)
+    }
+
     fn layout_of(count: usize) -> Result<Layout, LayoutError> {
         let (mut layout, _) = Layout::new::<H>().extend(Layout::array::<F>(count)?)?;
         layout = layout.pad_to_align();
