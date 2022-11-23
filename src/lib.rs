@@ -533,7 +533,7 @@ impl<'a, H, F> DstSliceMut<'a, H, F> {
     }
 }
 
-unsafe impl<'a, H, F> Send for DstSliceMut<'a, H, F>;
+unsafe impl<'a, H, F> Send for DstSliceMut<'a, H, F> {};
 
 pub struct DstChunksMut<'a, H: Sized, F: Sized> {
     slice: DstSliceMut<'a, H, F>,
