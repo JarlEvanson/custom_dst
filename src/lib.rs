@@ -393,6 +393,28 @@ impl<H, F> DstArray<H, F> {
     }
 }
 
+trait SplitSliceMutExt<'a, H, F> {
+    unsafe fn split_at_mut(
+        self,
+        len: usize,
+        mid: usize,
+    ) -> (DstSliceMut<'a, H, F>, DstSliceMut<'a, H, F>);
+    unsafe fn split_at_mut_unchecked(
+        self,
+        len: usize,
+        mid: usize,
+    ) -> (DstSliceMut<'a, H, F>, DstSliceMut<'a, H, F>);
+}
+
+trait SplitSliceExt<'a, H, F> {
+    unsafe fn split_at(self, len: usize, mid: usize) -> (DstSlice<'a, H, F>, DstSlice<'a, H, F>);
+    unsafe fn split_at_unchecked(
+        self,
+        len: usize,
+        mid: usize,
+    ) -> (DstSlice<'a, H, F>, DstSlice<'a, H, F>);
+}
+
 impl<H, F> Drop for DstArray<H, F> {
     fn drop(&mut self) {
         let stride = self.get_stride();
@@ -450,6 +472,16 @@ pub struct DstSliceMut<'a, H: Sized, F: Sized> {
     phantom: PhantomData<&'a mut DstData<H, F>>,
 }
 
+impl<'a, H, F> DstSliceMut<'a, H, F> {
+    pub fn as_ptr(&self) -> *const DstData<H, F> {
+        self.start as *const DstData<H, F>
+    }
+
+    pub fn as_mut_ptr(&mut self) -> *mut DstData<H, F> {
+        self.start
+    }
+}
+
 impl<'a, H, F> Index<usize> for DstSliceMut<'a, H, F> {
     type Output = DstData<H, F>;
 
@@ -480,20 +512,7 @@ impl<'a, H, F> IndexMut<usize> for DstSliceMut<'a, H, F> {
     }
 }
 
-trait SplitSliceExt<'a, H, F> {
-    unsafe fn split_at_mut(
-        self,
-        len: usize,
-        mid: usize,
-    ) -> (DstSliceMut<'a, H, F>, DstSliceMut<'a, H, F>);
-    unsafe fn split_at_mut_unchecked(
-        self,
-        len: usize,
-        mid: usize,
-    ) -> (DstSliceMut<'a, H, F>, DstSliceMut<'a, H, F>);
-}
-
-impl<'a, H, F> SplitSliceExt<'a, H, F> for *mut DstSliceMut<'a, H, F> {
+impl<'a, H, F> SplitSliceMutExt<'a, H, F> for *mut DstSliceMut<'a, H, F> {
     unsafe fn split_at_mut(
         self,
         len: usize,
@@ -531,13 +550,69 @@ impl<'a, H, F> SplitSliceExt<'a, H, F> for *mut DstSliceMut<'a, H, F> {
     }
 }
 
-impl<'a, H, F> DstSliceMut<'a, H, F> {
-    pub fn as_mut_ptr(&mut self) -> *mut DstData<H, F> {
+unsafe impl<'a, H, F> Send for DstSliceMut<'a, H, F> {}
+
+pub struct DstSlice<'a, H: Sized, F: Sized> {
+    start: *const DstData<H, F>,
+    len: usize,
+    phantom: PhantomData<&'a DstData<H, F>>,
+}
+
+impl<'a, H, F> DstSlice<'a, H, F> {
+    pub fn as_ptr(&mut self) -> *const DstData<H, F> {
         self.start
     }
 }
 
-unsafe impl<'a, H, F> Send for DstSliceMut<'a, H, F> {}
+impl<'a, H, F> Index<usize> for DstSlice<'a, H, F> {
+    type Output = DstData<H, F>;
+
+    fn index(&self, index: usize) -> &DstData<H, F> {
+        assert!(index < self.len);
+
+        let stride = unsafe { DstData::<H, F>::layout_of((*self.start).footer.len()) }
+            .unwrap()
+            .size();
+
+        let ptr = unsafe { self.start.byte_add(stride * index) };
+
+        unsafe { &*ptr }
+    }
+}
+
+impl<'a, H, F> SplitSliceExt<'a, H, F> for *mut DstSliceMut<'a, H, F> {
+    unsafe fn split_at(self, len: usize, mid: usize) -> (DstSlice<'a, H, F>, DstSlice<'a, H, F>) {
+        assert!(mid <= len);
+
+        unsafe { Self::split_at_unchecked(self, len, mid) }
+    }
+
+    unsafe fn split_at_unchecked(
+        self,
+        len: usize,
+        mid: usize,
+    ) -> (DstSlice<'a, H, F>, DstSlice<'a, H, F>) {
+        unsafe {
+            (
+                DstSlice {
+                    start: (*self).start,
+                    len: mid,
+                    phantom: PhantomData,
+                },
+                DstSlice {
+                    start: (*self).start.byte_add(
+                        DstData::<H, F>::layout_of((*(*self).start).get_footer().len())
+                            .unwrap()
+                            .size()
+                            * mid,
+                    ),
+                    len: len - mid,
+                    phantom: PhantomData,
+                },
+            )
+        }
+    }
+}
 
 pub struct DstChunksMut<'a, H: Sized, F: Sized> {
     slice: DstSliceMut<'a, H, F>,
