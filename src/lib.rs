@@ -480,6 +480,17 @@ impl<'a, H, F> DstSliceMut<'a, H, F> {
     pub fn as_mut_ptr(&mut self) -> *mut DstData<H, F> {
         self.start
     }
+
+    pub fn as_shared_slice<'b>(self) -> DstSlice<'a, H, F>
+    where
+        'a: 'b,
+    {
+        DstSlice {
+            start: self.start as *const DstData<H, F>,
+            len: self.len,
+            phantom: PhantomData,
+        }
+    }
 }
 
 impl<'a, H, F> Index<usize> for DstSliceMut<'a, H, F> {
