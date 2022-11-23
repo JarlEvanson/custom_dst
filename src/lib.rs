@@ -614,6 +614,10 @@ impl<'a, H, F> SplitSliceExt<'a, H, F> for *mut DstSliceMut<'a, H, F> {
     }
 }
 
+unsafe impl<'a, H, F> Send for DstSlice<'a, H, F> {}
+
+unsafe impl<'a, H, F> Sync for DstSlice<'a, H, F> {}
+
 pub struct DstChunksMut<'a, H: Sized, F: Sized> {
     slice: DstSliceMut<'a, H, F>,
     chunk_size: usize,
