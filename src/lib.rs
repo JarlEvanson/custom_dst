@@ -35,7 +35,7 @@ impl<H, F> DstData<H, F> {
         &self.footer
     }
 
-    pub fn get_mut_footer(&mut self) -> &mut [F] {
+    pub fn get_footer_mut(&mut self) -> &mut [F] {
         &mut self.footer
     }
 
@@ -198,19 +198,19 @@ pub struct Dst<H: Sized, F: Sized> {
 
 impl<H, F> Dst<H, F> {
     pub fn get_header_ref(&self) -> &H {
-        unsafe { &(*self.ptr).header }
+        unsafe { (*self.ptr).get_header() }
     }
 
     pub fn get_header_ref_mut(&mut self) -> &mut H {
-        unsafe { &mut (*self.ptr).header }
+        unsafe { (*self.ptr).get_header_mut() }
     }
 
     pub fn get_footer_ref(&self) -> &[F] {
-        unsafe { &(*self.ptr).footer }
+        unsafe { (*self.ptr).get_footer() }
     }
 
     pub fn get_footer_ref_mut(&mut self) -> &mut [F] {
-        unsafe { &mut (*self.ptr).footer }
+        unsafe { (*self.ptr).get_footer_mut() }
     }
 
     pub fn get_footer_len(&self) -> usize {
@@ -232,29 +232,27 @@ impl<H, F> Drop for Dst<H, F> {
 
 pub struct MaybeUninitDstArray<H: Sized, F: Sized> {
     len: usize,
+    stride: usize,
     ptr: *mut DstData<H, F>,
 }
 
 impl<H, F> MaybeUninitDstArray<H, F> {
-    pub fn new(count: usize, array_size: usize) -> MaybeUninitDstArray<H, F> {
+    pub fn new(count: usize, array_size: usize) -> Self {
         MaybeUninitDstArray {
             len: array_size,
+            stride: unsafe { DstData::<H, F>::layout_of(count).unwrap_unchecked().size() },
             ptr: unsafe { DstData::alloc_self_array(count, array_size) },
         }
     }
 
     fn get_stride(&self) -> usize {
-        DstData::<H, F>::layout_of(self.get_footer_len())
-            .unwrap()
-            .size()
+        self.stride
     }
 
     fn get_element(&self, arr_index: usize) -> MaybeUninitDst<H, F> {
         assert!(arr_index < self.len);
 
-        let stride = self.get_stride();
-
-        let ptr = unsafe { self.ptr.byte_add(stride * arr_index) };
+        let ptr = unsafe { self.ptr.byte_add(self.get_stride() * arr_index) };
 
         MaybeUninitDst { ptr }
     }
@@ -264,12 +262,9 @@ impl<H, F> MaybeUninitDstArray<H, F> {
     pub unsafe fn assume_init(self) -> DstArray<H, F> {
         DstArray {
             len: self.len,
+            stride: self.stride,
             ptr: self.ptr,
         }
-    }
-
-    fn get_footer_len(&self) -> usize {
-        MaybeUninitDst { ptr: self.ptr }.get_footer_len()
     }
 
     pub fn write_header(&mut self, arr_index: usize, header: H) {
@@ -326,12 +321,13 @@ impl<H, F> MaybeUninitDstArray<H, F> {
 
 pub struct DstArray<H, F> {
     len: usize,
+    stride: usize,
     ptr: *mut DstData<H, F>,
 }
 
 impl<H, F> DstArray<H, F> {
     fn get_stride(&self) -> usize {
-        unsafe { DstData::<H, F>::layout_of(DstData::get_len(self.ptr)).unwrap() }.size()
+        self.stride
     }
 
     pub fn get_header_ref(&self, arr_index: usize) -> &H {
@@ -358,11 +354,22 @@ impl<H, F> DstArray<H, F> {
         assert!(start < end);
         assert!(end <= self.len);
 
-        let stride = self.get_stride();
-
         DstSliceMut {
-            start: unsafe { self.ptr.byte_add(stride * start) },
+            start: unsafe { self.ptr.byte_add(self.get_stride() * start) },
             len: end - start,
+            stride: self.stride,
+            phantom: PhantomData,
+        }
+    }
+
+    pub fn get_slice(&mut self, start: usize, end: usize) -> DstSlice<H, F> {
+        assert!(start < end);
+        assert!(end <= self.len);
+
+        DstSlice {
+            start: unsafe { self.ptr.byte_add(self.get_stride() * start) },
+            len: end - start,
+            stride: self.stride,
             phantom: PhantomData,
         }
     }
@@ -370,24 +377,21 @@ impl<H, F> DstArray<H, F> {
     pub fn get_mut_arr_element(&mut self, index: usize) -> &mut DstData<H, F> {
         assert!(index < self.len);
 
-        let stride = self.get_stride();
-
-        unsafe { &mut *self.ptr.byte_add(stride * index) }
+        unsafe { &mut *self.ptr.byte_add(self.get_stride() * index) }
     }
 
     pub fn swap(&mut self, arr: &mut DstArray<H, F>) {
         std::mem::swap(&mut self.ptr, &mut arr.ptr);
         std::mem::swap(&mut self.len, &mut arr.len);
+        std::mem::swap(&mut self.stride, &mut arr.stride);
     }
 
     pub fn get_arr_element(&self, index: usize) -> &DstData<H, F> {
         assert!(index < self.len);
 
-        let stride = self.get_stride();
-
         unsafe {
             &*transmute::<*mut DstData<H, F>, *const DstData<H, F>>(
-                self.ptr.byte_add(stride * index),
+                self.ptr.byte_add(self.get_stride() * index),
             )
         }
     }
@@ -417,14 +421,12 @@ trait SplitSliceExt<'a, H, F> {
 
 impl<H, F> Drop for DstArray<H, F> {
     fn drop(&mut self) {
-        let stride = self.get_stride();
-
-        let mut ptr = unsafe { self.ptr.byte_add(stride) };
+        let mut ptr = unsafe { self.ptr.byte_add(self.get_stride()) };
 
         for _ in 0..self.len {
             unsafe {
                 drop_in_place(ptr);
-                ptr = ptr.byte_add(stride);
+                ptr = ptr.byte_add(self.get_stride());
             }
         }
 
@@ -440,13 +442,9 @@ impl<H, F> Index<usize> for DstArray<H, F> {
     type Output = DstData<H, F>;
 
     fn index(&self, index: usize) -> &DstData<H, F> {
-        let stride = unsafe { DstData::<H, F>::layout_of((*self.ptr).footer.len()) }
-            .unwrap()
-            .size();
+        let ptr = unsafe { self.ptr.byte_add(self.get_stride() * index) };
 
-        let ptr = unsafe { self.ptr.byte_add(stride * index) };
-
-        assert!(ptr <= unsafe { self.ptr.byte_add(stride * self.len) });
+        assert!(ptr <= unsafe { self.ptr.byte_add(self.get_stride() * self.len) });
 
         unsafe { &*ptr }
     }
@@ -454,13 +452,9 @@ impl<H, F> Index<usize> for DstArray<H, F> {
 
 impl<H, F> IndexMut<usize> for DstArray<H, F> {
     fn index_mut(&mut self, index: usize) -> &mut DstData<H, F> {
-        let stride = unsafe { DstData::<H, F>::layout_of((*self.ptr).footer.len()) }
-            .unwrap()
-            .size();
+        let ptr = unsafe { self.ptr.byte_add(self.get_stride() * index) };
 
-        let ptr = unsafe { self.ptr.byte_add(stride * index) };
-
-        assert!(ptr <= unsafe { self.ptr.byte_add(stride * self.len) });
+        assert!(ptr <= unsafe { self.ptr.byte_add(self.get_stride() * self.len) });
 
         unsafe { &mut *ptr }
     }
@@ -469,6 +463,7 @@ impl<H, F> IndexMut<usize> for DstArray<H, F> {
 pub struct DstSliceMut<'a, H: Sized, F: Sized> {
     start: *mut DstData<H, F>,
     len: usize,
+    stride: usize,
     phantom: PhantomData<&'a mut DstData<H, F>>,
 }
 
@@ -488,6 +483,7 @@ impl<'a, H, F> DstSliceMut<'a, H, F> {
         DstSlice {
             start: self.start as *const DstData<H, F>,
             len: self.len,
+            stride: self.stride,
             phantom: PhantomData,
         }
     }
@@ -499,11 +495,7 @@ impl<'a, H, F> Index<usize> for DstSliceMut<'a, H, F> {
     fn index(&self, index: usize) -> &DstData<H, F> {
         assert!(index < self.len);
 
-        let stride = unsafe { DstData::<H, F>::layout_of((*self.start).footer.len()) }
-            .unwrap()
-            .size();
-
-        let ptr = unsafe { self.start.byte_add(stride * index) };
+        let ptr = unsafe { self.start.byte_add(self.stride * index) };
 
         unsafe { &*ptr }
     }
@@ -513,11 +505,7 @@ impl<'a, H, F> IndexMut<usize> for DstSliceMut<'a, H, F> {
     fn index_mut(&mut self, index: usize) -> &mut DstData<H, F> {
         assert!(index < self.len);
 
-        let stride = unsafe { DstData::<H, F>::layout_of((*self.start).footer.len()) }
-            .unwrap()
-            .size();
-
-        let ptr = unsafe { self.start.byte_add(stride * index) };
+        let ptr = unsafe { self.start.byte_add(self.stride * index) };
 
         unsafe { &mut *ptr }
     }
@@ -544,16 +532,13 @@ impl<'a, H, F> SplitSliceMutExt<'a, H, F> for *mut DstSliceMut<'a, H, F> {
                 DstSliceMut {
                     start: (*self).start,
                     len: mid,
+                    stride: (*self).stride,
                     phantom: PhantomData,
                 },
                 DstSliceMut {
-                    start: (*self).start.byte_add(
-                        DstData::<H, F>::layout_of((*(*self).start).get_footer().len())
-                            .unwrap()
-                            .size()
-                            * mid,
-                    ),
+                    start: (*self).start.byte_add((*self).stride * mid),
                     len: len - mid,
+                    stride: (*self).stride,
                     phantom: PhantomData,
                 },
             )
@@ -566,6 +551,7 @@ unsafe impl<'a, H, F> Send for DstSliceMut<'a, H, F> {}
 pub struct DstSlice<'a, H: Sized, F: Sized> {
     start: *const DstData<H, F>,
     len: usize,
+    stride: usize,
     phantom: PhantomData<&'a DstData<H, F>>,
 }
 
@@ -581,11 +567,7 @@ impl<'a, H, F> Index<usize> for DstSlice<'a, H, F> {
     fn index(&self, index: usize) -> &DstData<H, F> {
         assert!(index < self.len);
 
-        let stride = unsafe { DstData::<H, F>::layout_of((*self.start).footer.len()) }
-            .unwrap()
-            .size();
-
-        let ptr = unsafe { self.start.byte_add(stride * index) };
+        let ptr = unsafe { self.start.byte_add(self.stride * index) };
 
         unsafe { &*ptr }
     }
@@ -608,16 +590,13 @@ impl<'a, H, F> SplitSliceExt<'a, H, F> for *mut DstSliceMut<'a, H, F> {
                 DstSlice {
                     start: (*self).start,
                     len: mid,
+                    stride: (*self).stride,
                     phantom: PhantomData,
                 },
                 DstSlice {
-                    start: (*self).start.byte_add(
-                        DstData::<H, F>::layout_of((*(*self).start).get_footer().len())
-                            .unwrap()
-                            .size()
-                            * mid,
-                    ),
+                    start: (*self).start.byte_add((*self).stride * mid),
                     len: len - mid,
+                    stride: (*self).stride,
                     phantom: PhantomData,
                 },
             )
